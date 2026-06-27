@@ -1,22 +1,4 @@
-"""Graph-to-sequence transformation (the heart of GAGA).
-
-For every node we walk its neighbourhood up to ``n_hops`` along each relation and
-summarise the neighbours found at each hop into three group vectors:
-
-* ``h_benign``  - mean feature of neighbours that are *training* nodes labelled 0
-* ``h_fraud``   - mean feature of neighbours that are *training* nodes labelled 1
-* ``h_unknown`` - mean feature of every other neighbour (val/test/unlabelled)
-
-Only training labels are revealed, and a node never sees its own label, so no
-label leakage occurs. The per-node sequence is::
-
-    [ center | hop1(benign,fraud,unknown) | hop2(...) | ... ]   (repeated per relation)
-
-with total length ``R * (1 + n_hops * (n_classes + 1))``.
-
-Building the sequences is the one expensive, one-off step, so the result is
-cached to disk and the work is spread across processes.
-"""
+"""Graph-to-sequence transformation"""
 
 import os
 import multiprocessing as mp
@@ -26,8 +8,6 @@ from scipy import sparse
 from tqdm import tqdm
 
 
-# Globals populated inside each worker process (inherited via fork). Keeping the
-# big arrays here avoids re-pickling them for every task.
 _CTX = {}
 
 
@@ -47,14 +27,14 @@ def _init_context(features, labels, adjacencies, train_mask,
 
 
 def _neighbors(adj, nodes):
-    """Unique 1-hop neighbours of a set of nodes under a single relation."""
+    """Unique 1-hop neighbours of a set of nodes under a single relation"""
     if len(nodes) == 0:
         return np.empty(0, dtype=np.int64)
     return np.unique(adj[nodes].indices)
 
 
 def _aggregate(idx):
-    """Mean feature over ``idx`` (zeros if empty), optionally group-normalised."""
+    """Mean feature over ``idx`` (zeros if empty), optionally group-normalized"""
     feat_dim = _CTX["feat_dim"]
     if len(idx) == 0:
         return np.zeros(feat_dim, dtype=np.float32)
@@ -65,7 +45,7 @@ def _aggregate(idx):
 
 
 def _group_block(center, neighbors):
-    """Split neighbours into (benign, fraud, unknown) and mean each group."""
+    """Split neighbours into (benign, fraud, unknown) and mean each group"""
     if len(neighbors) == 0:
         return np.zeros((_CTX["n_groups"], _CTX["feat_dim"]), dtype=np.float32)
 
@@ -81,23 +61,18 @@ def _group_block(center, neighbors):
 
 
 def _node_sequence(center):
-    """Build the full sequence for one node across all relations.
-
-    With group aggregation each hop yields ``n_groups`` tokens (benign / fraud /
-    unknown); without it (the §5.7.1 baseline) each hop is a single mean over all
-    neighbours, i.e. a plain GNN-style mean aggregator that ignores labels.
-    """
+    """Build the full sequence for one node across all relations"""
     rows = []
     group_agg = _CTX["group_agg"]
     for adj in _CTX["adjacencies"]:
-        rows.append(_CTX["features"][center][None, :])  # center token
+        rows.append(_CTX["features"][center][None, :])  
         frontier = np.array([center], dtype=np.int64)
         for _ in range(_CTX["n_hops"]):
             frontier = _neighbors(adj, frontier)
             if group_agg:
                 rows.append(_group_block(center, frontier))
             else:
-                rows.append(_aggregate(frontier)[None, :])  # single mean token
+                rows.append(_aggregate(frontier)[None, :])  
     return np.concatenate(rows, axis=0)
 
 
@@ -117,31 +92,7 @@ def _process_block(bounds):
 def build_sequences(data, n_hops, grp_norm=False, add_self_loop=False,
                     group_agg=True, reveal_ids=None,
                     n_workers=None, cache_file=None):
-    """Turn a loaded dataset into the (N, S, E) sequence tensor used for training.
-
-    Parameters
-    ----------
-    data : dict
-        Output of :func:`gaga.data.load_dataset`.
-    n_hops : int
-        Number of hops K to expand around each node.
-    group_agg : bool
-        If True (default), split each hop's neighbours into benign/fraud/unknown
-        group means. If False, use a single mean over all neighbours (the plain
-        mean-aggregator baseline of §5.7.1).
-    reveal_ids : array-like, optional
-        Node ids whose (training) labels are revealed during group aggregation.
-        Defaults to ``data['train_ids']``. Used for the §5.7.3 label-rate study,
-        where fewer labels are observed than are used for supervision.
-    cache_file : str, optional
-        If given, load from here when present, otherwise save the result here.
-
-    Returns
-    -------
-    np.ndarray of shape
-    ``(n_nodes, R * (1 + n_hops * groups_per_hop), feat_dim)`` where
-    ``groups_per_hop`` is ``n_classes + 1`` with group aggregation, else 1.
-    """
+    """Turn a loaded dataset into the (N, S, E) sequence tensor used for training"""
     if cache_file and os.path.exists(cache_file):
         print(f"Loading cached sequences from {cache_file}")
         return np.load(cache_file)
@@ -171,7 +122,6 @@ def build_sequences(data, n_hops, grp_norm=False, add_self_loop=False,
                  grp_norm, group_agg)
     sequences = np.zeros((n_nodes, seq_len, features.shape[1]), dtype=np.float32)
 
-    # Split nodes into one contiguous block per worker.
     block = n_nodes // n_workers + 1
     bounds = [(s, min(s + block, n_nodes)) for s in range(0, n_nodes, block)]
 

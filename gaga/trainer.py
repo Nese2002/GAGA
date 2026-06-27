@@ -32,31 +32,18 @@ def _make_loaders(sequences, labels, data, batch_size):
     return loaders["train_ids"], loaders["val_ids"], loaders["test_ids"]
 
 
-def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
-    """Run one full training + evaluation cycle from a config dict.
+def _prepare(config, cache_dir):
+    """Build the data split, (cached) sequences, loaders and model for a config.
 
-    Saves the best-validation checkpoint and a JSON training history under
-    ``ckpt_dir``.
-
-    Returns
-    -------
-    (test_metrics, history) : tuple
-        ``test_metrics`` is the metrics dict on the test set; ``history`` holds
-        per-epoch ``train_loss`` / ``val_auc`` / ``val_f1_macro`` lists.
+    Shared by ``train`` and ``evaluate`` so both see the identical split/sequences.
     """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # config["seed"] fixes the data split and the (cached) sequences; init_seed
-    # varies weight init + batch order so repeated runs differ (mean +/- std).
     _set_seed(config.get("init_seed", config["seed"]))
 
     data = load_dataset(config["dataset"], root=config.get("data_root", "./data_cache"),
                         train_size=config["train_size"], val_size=config["val_size"],
                         seed=config["seed"], norm_feat=config.get("norm_feat", True))
 
-    # Optionally reveal only a fraction of the training labels during group
-    # aggregation (the §5.7.3 label-rate study); supervision still uses all of
-    # train_ids. label_rate is expressed as a fraction of all nodes, matching the
-    # paper's "Label (%)" column.
     group_agg = config.get("group_agg", True)
     reveal_ids = None
     label_tag = ""
@@ -79,8 +66,7 @@ def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
         group_agg=group_agg, reveal_ids=reveal_ids,
         n_workers=config.get("n_workers"), cache_file=cache_file)
 
-    train_loader, val_loader, test_loader = _make_loaders(
-        sequences, data["labels"], data, config["batch_size"])
+    loaders = _make_loaders(sequences, data["labels"], data, config["batch_size"])
 
     model = GAGA(feat_dim=data["feat_dim"], emb_dim=config["emb_dim"],
                  n_classes=data["n_classes"], n_hops=config["n_hops"],
@@ -93,6 +79,14 @@ def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
                  use_group=config.get("use_group", True),
                  backbone=config.get("backbone", "transformer")).to(device)
 
+    return device, data, loaders, model
+
+
+def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
+    """Run one full training + evaluation cycle from a config dict    """
+    device, data, loaders, model = _prepare(config, cache_dir)
+    train_loader, val_loader, test_loader = loaders
+
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model parameters: {n_params:,}")
 
@@ -101,7 +95,6 @@ def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
     criterion = nn.CrossEntropyLoss()
 
     os.makedirs(ckpt_dir, exist_ok=True)
-    # ablation runs pass a run_name so they don't overwrite the main checkpoint
     run_name = config.get("run_name", config["dataset"])
     ckpt_path = os.path.join(ckpt_dir, f"{run_name}_best.pt")
 
@@ -160,6 +153,35 @@ def train(config, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
     print(f"  f1-fraud={test['f1_fraud']:.4f} f1-benign={test['f1_benign']:.4f} "
           f"recall-macro={test['recall_macro']:.4f}")
     return test, history
+
+
+def evaluate(config, ckpt_path=None, cache_dir="./seq_cache", ckpt_dir="./checkpoints"):
+    """Load a saved checkpoint and evaluate it on the test set — no training.
+
+    Rebuilds the same split / cached sequences as ``train`` (so the test set matches
+    what the checkpoint was trained on), reconstructs the model, loads the weights,
+    picks the operating threshold on validation and reports the test metrics.
+
+    ``ckpt_path`` defaults to ``{ckpt_dir}/{run_name or dataset}_best.pt``.
+    Returns the test-metrics dict.
+    """
+    device, _, loaders, model = _prepare(config, cache_dir)
+    _, val_loader, test_loader = loaders
+
+    run_name = config.get("run_name", config["dataset"])
+    if ckpt_path is None:
+        ckpt_path = os.path.join(ckpt_dir, f"{run_name}_best.pt")
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.eval()
+    print(f"Loaded checkpoint {ckpt_path}")
+
+    # Same protocol as train(): tune threshold on val, then score the test set.
+    v_true, v_prob, _ = predict(model, val_loader, device)
+    thres = best_pr_threshold(v_true, v_prob)
+    t_true, t_prob, t_pred = predict(model, test_loader, device, threshold=thres)
+    test = compute_metrics(t_true, t_prob, t_pred)
+    print(f"Test @ thres={thres:.3f}: {format_metrics(test)}")
+    return test
 
 
 def train_multiple(config, n_runs, cache_dir="./seq_cache"):

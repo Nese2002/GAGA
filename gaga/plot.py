@@ -4,18 +4,6 @@ import matplotlib.pyplot as plt
 
 
 def plot_history(history, save_path=None, show=False):
-    """Plot training loss and validation AUC/F1 against epochs.
-
-    Parameters
-    ----------
-    history : dict
-        Dict with lists under keys ``epoch``, ``train_loss``, ``val_auc``,
-        ``val_f1_macro`` (as returned by :func:`gaga.trainer.train`).
-    save_path : str, optional
-        If given, the figure is written here (e.g. ``runs/amazon_curves.png``).
-    show : bool
-        Call ``plt.show()`` (useful in notebooks).
-    """
     epochs = history["epoch"]
     fig, ax_loss = plt.subplots(figsize=(7, 4.5))
 

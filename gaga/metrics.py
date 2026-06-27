@@ -7,11 +7,6 @@ from sklearn import metrics
 
 @torch.no_grad()
 def predict(model, loader, device, threshold=0.5):
-    """Run the model over a loader and return (y_true, y_prob, y_pred).
-
-    Logits are passed through a sigmoid and the positive-class column is taken
-    as the fraud probability (matching the original GAGA evaluation).
-    """
     model.eval()
     probs, trues = [], []
     for seq, label in loader:
@@ -32,7 +27,6 @@ def best_pr_threshold(y_true, y_prob):
     precision, recall, thresholds = metrics.precision_recall_curve(y_true, y_prob)
     f1 = np.divide(2 * precision * recall, precision + recall,
                    out=np.zeros_like(precision), where=(precision + recall) > 0)
-    # thresholds has one fewer entry than precision/recall.
     return thresholds[min(f1.argmax(), len(thresholds) - 1)]
 
 

@@ -1,23 +1,12 @@
-"""Loading of the YelpChi and Amazon fraud datasets.
-
-Both graphs ship as MATLAB ``.mat`` files containing a dense/sparse feature
-matrix, a label vector and one sparse adjacency matrix per relation. We download
-them straight from the DGL mirror, build the per-relation adjacencies with SciPy
-and reproduce the exact train/val/test split used by the original benchmark so
-the numbers stay comparable.
-"""
+"""Loading of the YelpChi and Amazon fraud datasets"""
 
 import os
 import zipfile
 import urllib.request
-
 import numpy as np
 from scipy import io as sio
 from scipy import sparse
 
-
-# Remote archives + the relations each graph exposes. Relation order is fixed so
-# that the learned relation embeddings stay consistent across runs.
 _DATASETS = {
     "yelp": {
         "url": "https://data.dgl.ai/dataset/FraudYelp.zip",
@@ -55,11 +44,7 @@ def _download(name, cache_dir):
 
 
 def _row_normalize(feats):
-    """Row-normalise the feature matrix (each row sums to ~1).
-
-    A small constant is added to the row sums to keep all-zero rows finite,
-    matching the normalisation used by the reference implementation.
-    """
+    """Row-normalize the feature matrix """
     rowsum = np.asarray(feats.sum(axis=1)).flatten() + 0.01
     inv = np.power(rowsum, -1)
     inv[np.isinf(inv)] = 0.0
@@ -84,25 +69,8 @@ def _split_indices(n_nodes, name, train_size, val_size, seed):
 
 
 def load_dataset(name, root="./data_cache", train_size=0.4, val_size=0.1,
-                 seed=717, norm_feat=True):
-    """Load a fraud graph.
-
-    Parameters
-    ----------
-    name : str
-        ``"yelp"`` or ``"amazon"``.
-    root : str
-        Directory used to cache the downloaded ``.mat`` files.
-
-    Returns
-    -------
-    dict with keys:
-        ``features``   - float32 array, shape (N, feat_dim)
-        ``labels``     - int64 array, shape (N,)
-        ``adjacencies``- list of CSR matrices, one per relation
-        ``train_ids`` / ``val_ids`` / ``test_ids`` - int64 index arrays
-        ``n_relations`` / ``n_classes`` / ``feat_dim``
-    """
+                 seed=42, norm_feat=True):
+    """Load a fraud graph"""
     if name not in _DATASETS:
         raise ValueError(f"unknown dataset {name!r}, expected one of {list(_DATASETS)}")
 

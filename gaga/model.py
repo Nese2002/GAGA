@@ -1,33 +1,19 @@
-"""The GAGA Transformer classifier.
-
-Each token of a node's sequence is a feature vector with a known *role*: which
-hop it came from, which relation, and which group (benign / fraud / unknown). We
-inject that structure through three learned embeddings, run a standard
-Transformer encoder over the sequence, then read out the per-relation center
-tokens and concatenate them for classification.
-"""
+"""The GAGA Transformer classifier"""
 
 import torch
 import torch.nn as nn
 
 
 class SequenceEncoder(nn.Module):
-    """Project raw features and add hop / relation / group embeddings.
-
-    The three learnable encodings can each be switched off independently
-    (``use_hop`` / ``use_relation`` / ``use_group``) for the §5.7.2 ablation.
-    When the sequences were built without group aggregation (``group_agg=False``)
-    each hop is a single mean token, so the group encoding carries no meaning and
-    is forced off.
-    """
+    """Project raw features and add hop / relation / group embeddings"""
 
     def __init__(self, feat_dim, emb_dim, n_hops, n_relations, n_classes, dropout,
                  group_agg=True, use_hop=True, use_relation=True, use_group=True):
         super().__init__()
         groups_per_hop = (n_classes + 1) if group_agg else 1
-        base_len = 1 + n_hops * groups_per_hop  # tokens contributed by one relation
+        base_len = 1 + n_hops * groups_per_hop  
 
-        # the group encoding only exists when neighbours are split into groups
+        
         use_group = use_group and group_agg
         self.use_hop, self.use_relation, self.use_group = use_hop, use_relation, use_group
 
@@ -37,11 +23,10 @@ class SequenceEncoder(nn.Module):
         self.group_emb = nn.Embedding(groups_per_hop, emb_dim) if use_group else None
         self.dropout = nn.Dropout(dropout)
 
-        # Per-token index patterns; they depend only on the dimensions, so we
-        # build them once and register as buffers (moved with .to(device)).
+        
         hop_block = [0] + [h for h in range(1, n_hops + 1) for _ in range(groups_per_hop)]
         if group_agg:
-            grp_block = [n_classes] + list(range(groups_per_hop)) * n_hops  # center -> "unknown"
+            grp_block = [n_classes] + list(range(groups_per_hop)) * n_hops
         else:
             grp_block = [0] * base_len
 
@@ -56,7 +41,6 @@ class SequenceEncoder(nn.Module):
         self.register_buffer("rel_idx", torch.tensor(rel_idx, dtype=torch.long))
 
     def forward(self, x):
-        # x: (N, S, feat_dim) -> (N, S, emb_dim), then add the enabled encodings.
         tokens = self.input_proj(x)
         pos = None
         if self.use_hop:
@@ -73,19 +57,17 @@ class SequenceEncoder(nn.Module):
 
 
 class GAGA(nn.Module):
-    """GAGA classifier with switchable components for the §5.7 ablation.
-
-    Parameters that control the ablations
+    """GAGA classifier with switchable components. Parameters that control the ablations
     -------------------------------------
     group_agg : bool
         Whether the input sequences use group aggregation (3 group tokens per hop)
         or a single mean token per hop. Must match how ``build_sequences`` was run.
     use_hop / use_relation / use_group : bool
-        Toggle each learnable encoding (Table 5).
+        Toggle each learnable encoding
     backbone : {'transformer', 'mlp', 'none'}
         The sequence encoder applied before readout. ``'transformer'`` is GAGA;
         ``'mlp'`` is a token-wise MLP (no cross-token attention); ``'none'`` skips
-        it entirely. Used to isolate the contribution of self-attention (§5.7.1).
+        it entirely. Used to isolate the contribution of self-attention 
     """
 
     def __init__(self, feat_dim, emb_dim, n_classes, n_hops, n_relations,
@@ -109,7 +91,6 @@ class GAGA(nn.Module):
                 dropout=dropout, batch_first=True)
             self.sequence_model = nn.TransformerEncoder(layer, num_layers=n_layers)
         elif backbone == "mlp":
-            # token-wise feed-forward, applied independently per token (no attention)
             self.sequence_model = nn.Sequential(
                 nn.Linear(emb_dim, ff_dim), nn.ReLU(), nn.Dropout(dropout),
                 nn.Linear(ff_dim, emb_dim))
@@ -118,7 +99,6 @@ class GAGA(nn.Module):
         else:
             raise ValueError(f"unknown backbone {backbone!r}")
 
-        # Concatenate the center token of every relation, then classify.
         self.classifier = nn.Linear(emb_dim * n_relations, n_classes)
         self._init_weights()
 
@@ -128,10 +108,9 @@ class GAGA(nn.Module):
                 nn.init.xavier_uniform_(p)
 
     def forward(self, x):
-        h = self.encoder(x)                 # (N, S, E)
-        h = self.sequence_model(h)          # (N, S, E)
+        h = self.encoder(x)                
+        h = self.sequence_model(h)          
 
-        # Center token of each relation sits at multiples of base_len.
-        centers = h[:, 0::self.base_len, :]            # (N, n_relations, E)
-        agg = centers.reshape(centers.size(0), -1)     # (N, n_relations * E)
+        centers = h[:, 0::self.base_len, :]           
+        agg = centers.reshape(centers.size(0), -1)    
         return self.classifier(agg)
