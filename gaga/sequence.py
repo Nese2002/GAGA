@@ -32,7 +32,7 @@ _CTX = {}
 
 
 def _init_context(features, labels, adjacencies, train_mask,
-                  n_hops, n_groups, grp_norm):
+                  n_hops, n_groups, grp_norm, group_agg):
     _CTX.update(
         features=features,
         labels=labels,
@@ -41,6 +41,7 @@ def _init_context(features, labels, adjacencies, train_mask,
         n_hops=n_hops,
         n_groups=n_groups,
         grp_norm=grp_norm,
+        group_agg=group_agg,
         feat_dim=features.shape[1],
     )
 
@@ -80,20 +81,33 @@ def _group_block(center, neighbors):
 
 
 def _node_sequence(center):
-    """Build the full grouped sequence for one node across all relations."""
+    """Build the full sequence for one node across all relations.
+
+    With group aggregation each hop yields ``n_groups`` tokens (benign / fraud /
+    unknown); without it (the §5.7.1 baseline) each hop is a single mean over all
+    neighbours, i.e. a plain GNN-style mean aggregator that ignores labels.
+    """
     rows = []
+    group_agg = _CTX["group_agg"]
     for adj in _CTX["adjacencies"]:
         rows.append(_CTX["features"][center][None, :])  # center token
         frontier = np.array([center], dtype=np.int64)
         for _ in range(_CTX["n_hops"]):
             frontier = _neighbors(adj, frontier)
-            rows.append(_group_block(center, frontier))
+            if group_agg:
+                rows.append(_group_block(center, frontier))
+            else:
+                rows.append(_aggregate(frontier)[None, :])  # single mean token
     return np.concatenate(rows, axis=0)
+
+
+def _tokens_per_hop():
+    return _CTX["n_groups"] if _CTX["group_agg"] else 1
 
 
 def _process_block(bounds):
     start, end = bounds
-    seq_len = len(_CTX["adjacencies"]) * (1 + _CTX["n_hops"] * _CTX["n_groups"])
+    seq_len = len(_CTX["adjacencies"]) * (1 + _CTX["n_hops"] * _tokens_per_hop())
     out = np.zeros((end - start, seq_len, _CTX["feat_dim"]), dtype=np.float32)
     for i, center in enumerate(range(start, end)):
         out[i] = _node_sequence(center)
@@ -101,6 +115,7 @@ def _process_block(bounds):
 
 
 def build_sequences(data, n_hops, grp_norm=False, add_self_loop=False,
+                    group_agg=True, reveal_ids=None,
                     n_workers=None, cache_file=None):
     """Turn a loaded dataset into the (N, S, E) sequence tensor used for training.
 
@@ -110,12 +125,22 @@ def build_sequences(data, n_hops, grp_norm=False, add_self_loop=False,
         Output of :func:`gaga.data.load_dataset`.
     n_hops : int
         Number of hops K to expand around each node.
+    group_agg : bool
+        If True (default), split each hop's neighbours into benign/fraud/unknown
+        group means. If False, use a single mean over all neighbours (the plain
+        mean-aggregator baseline of §5.7.1).
+    reveal_ids : array-like, optional
+        Node ids whose (training) labels are revealed during group aggregation.
+        Defaults to ``data['train_ids']``. Used for the §5.7.3 label-rate study,
+        where fewer labels are observed than are used for supervision.
     cache_file : str, optional
         If given, load from here when present, otherwise save the result here.
 
     Returns
     -------
-    np.ndarray of shape (n_nodes, R * (1 + n_hops * (n_classes + 1)), feat_dim).
+    np.ndarray of shape
+    ``(n_nodes, R * (1 + n_hops * groups_per_hop), feat_dim)`` where
+    ``groups_per_hop`` is ``n_classes + 1`` with group aggregation, else 1.
     """
     if cache_file and os.path.exists(cache_file):
         print(f"Loading cached sequences from {cache_file}")
@@ -126,20 +151,24 @@ def build_sequences(data, n_hops, grp_norm=False, add_self_loop=False,
     adjacencies = data["adjacencies"]
     n_nodes = features.shape[0]
     n_groups = data["n_classes"] + 1
+    tokens_per_hop = n_groups if group_agg else 1
 
     if add_self_loop:
         eye = sparse.eye(n_nodes, format="csr", dtype=np.float32)
         adjacencies = [(adj + eye).tocsr() for adj in adjacencies]
 
+    reveal_ids = data["train_ids"] if reveal_ids is None else reveal_ids
     train_mask = np.zeros(n_nodes, dtype=bool)
-    train_mask[data["train_ids"]] = True
+    train_mask[reveal_ids] = True
 
     n_workers = n_workers or min(mp.cpu_count(), 8)
-    seq_len = len(adjacencies) * (1 + n_hops * n_groups)
+    seq_len = len(adjacencies) * (1 + n_hops * tokens_per_hop)
     print(f"Building sequences: nodes={n_nodes} seq_len={seq_len} "
-          f"hops={n_hops} workers={n_workers}")
+          f"hops={n_hops} group_agg={group_agg} revealed={int(train_mask.sum())} "
+          f"workers={n_workers}")
 
-    init_args = (features, labels, adjacencies, train_mask, n_hops, n_groups, grp_norm)
+    init_args = (features, labels, adjacencies, train_mask, n_hops, n_groups,
+                 grp_norm, group_agg)
     sequences = np.zeros((n_nodes, seq_len, features.shape[1]), dtype=np.float32)
 
     # Split nodes into one contiguous block per worker.
